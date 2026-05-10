@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+
+## 0.4.1 — 2026-05-10
 - Safari: discover profile-specific `WebsiteDataStore` cookie files and load cookies from the selected Safari store. (thanks @przemyslaw-szurmak)
 - Chromium: add Comet browser support. (thanks @Hilo-Hilo)
 - Chromium: add Yandex Browser support and use per-browser Safe Storage keys. (thanks @serezha93)
