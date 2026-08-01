@@ -282,20 +282,40 @@ enum ChromeCookieImporter {
     static func decryptChromiumValue(_ encryptedValue: Data, key: Data) -> String? {
         guard encryptedValue.count > 3 else { return nil }
         let prefix = encryptedValue.prefix(3)
-        let prefixString = String(data: prefix, encoding: .utf8)
-        let payload = encryptedValue.dropFirst(3)
+        guard String(data: prefix, encoding: .utf8) == "v10" else { return nil }
+        let payload = Data(encryptedValue.dropFirst(3))
 
-        if prefixString != "v10" {
-            return nil
+        let legacyIV = Data(repeating: 0x20, count: kCCBlockSizeAES128)
+        var candidates: [(value: String, score: Int)] = []
+
+        // Newer Chrome builds store a 16-byte prefix and the real IV in the
+        // ciphertext (payload[16..<32]) instead of using the legacy fixed IV.
+        if payload.count >= 32,
+           let decrypted = Self.decryptCBC(Data(payload[32...]), iv: Data(payload[16..<32]), key: key),
+           let candidate = Self.decodeCandidate(decrypted)
+        {
+            candidates.append(candidate)
         }
 
-        let iv = Data(repeating: 0x20, count: kCCBlockSizeAES128)
-        var out = Data(count: payload.count + kCCBlockSizeAES128)
+        // Legacy layout: "v10" + AES-128-CBC ciphertext with the fixed 16-space IV.
+        if let decrypted = Self.decryptCBC(Data(payload), iv: legacyIV, key: key),
+           let candidate = Self.decodeCandidate(decrypted)
+        {
+            candidates.append(candidate)
+        }
+
+        return candidates.max { $0.score < $1.score }?.value
+    }
+
+    private static func decryptCBC(_ ciphertext: Data, iv: Data, key: Data) -> Data? {
+        guard !ciphertext.isEmpty, ciphertext.count.isMultiple(of: kCCBlockSizeAES128) else {
+            return nil
+        }
+        var out = Data(count: ciphertext.count + kCCBlockSizeAES128)
         var outLength: size_t = 0
         let outCapacity = out.count
-
         let status = out.withUnsafeMutableBytes { outBytes in
-            payload.withUnsafeBytes { inBytes in
+            ciphertext.withUnsafeBytes { inBytes in
                 key.withUnsafeBytes { keyBytes in
                     iv.withUnsafeBytes { ivBytes in
                         CCCrypt(
@@ -306,7 +326,7 @@ enum ChromeCookieImporter {
                             key.count,
                             ivBytes.baseAddress,
                             inBytes.baseAddress,
-                            payload.count,
+                            ciphertext.count,
                             outBytes.baseAddress,
                             outCapacity,
                             &outLength)
@@ -316,15 +336,21 @@ enum ChromeCookieImporter {
         }
         guard status == kCCSuccess else { return nil }
         out.count = outLength
+        return out
+    }
 
-        let candidate = out.count > 32 ? out.dropFirst(32) : out[...]
-        if let decoded = String(data: Data(candidate), encoding: .utf8) {
-            return Self.cleanValue(decoded)
-        }
-        if let decoded = String(data: out, encoding: .utf8) {
-            return Self.cleanValue(decoded)
-        }
-        return nil
+    /// Decodes a decrypted payload and rejects results that are not mostly
+    /// printable ASCII. Decrypting with the wrong layout yields random bytes
+    /// that usually fail UTF-8 decoding or contain many control characters.
+    private static func decodeCandidate(_ data: Data) -> (value: String, score: Int)? {
+        guard let decoded = String(data: data, encoding: .utf8) else { return nil }
+        let cleaned = Self.cleanValue(decoded)
+        guard !cleaned.isEmpty else { return nil }
+        let scalars = Array(cleaned.unicodeScalars)
+        let printable = scalars.filter { $0.value >= 0x20 && $0.value <= 0x7E }
+            .count
+        guard printable * 10 >= scalars.count * 8 else { return nil }
+        return (cleaned, printable)
     }
 
     private static func cleanValue(_ value: String) -> String {

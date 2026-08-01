@@ -42,6 +42,48 @@ struct ChromeCookieImporterTests {
     }
 
     @Test
+    func `decrypts modern v10 layout with inline IV and 16-byte prefix`() {
+        let key = Data(repeating: 0x22, count: kCCKeySizeAES128)
+        let plaintext = Data("Fe26.2**session-value-1234567890".utf8)
+        let inlineIV = Data((0..<16).map { UInt8(0x30 + $0) })
+        let prefix = Data((0..<16).map { UInt8(0x80 + $0) })
+
+        let encrypted = Self.encryptAES128CBCPKCS7(
+            plaintext: plaintext,
+            key: key,
+            iv: inlineIV)
+        let encoded = Data("v10".utf8) + prefix + inlineIV + encrypted
+
+        let decrypted = ChromeCookieImporter.decryptChromiumValue(encoded, key: key)
+        #expect(decrypted == String(data: plaintext, encoding: .utf8))
+    }
+
+
+    @Test
+    func `legacy v10 values longer than 32 bytes are not truncated`() {
+        let key = Data(repeating: 0x33, count: kCCKeySizeAES128)
+        let plaintext = Data(String(repeating: "a", count: 60).utf8)
+
+        let encrypted = Self.encryptAES128CBCPKCS7(plaintext: plaintext, key: key)
+        let encoded = Data("v10".utf8) + encrypted
+
+        let decrypted = ChromeCookieImporter.decryptChromiumValue(encoded, key: key)
+        #expect(decrypted == String(data: plaintext, encoding: .utf8))
+    }
+
+    @Test
+    func `legacy v10 short values still decrypt`() {
+        let key = Data(repeating: 0x44, count: kCCKeySizeAES128)
+        let plaintext = Data("yes".utf8)
+
+        let encrypted = Self.encryptAES128CBCPKCS7(plaintext: plaintext, key: key)
+        let encoded = Data("v10".utf8) + encrypted
+
+        let decrypted = ChromeCookieImporter.decryptChromiumValue(encoded, key: key)
+        #expect(decrypted == "yes")
+    }
+
+    @Test
     func `chrome safe storage key caches noninteractive reads per browser`() throws {
         ChromeCookieImporter.resetSafeStorageKeyCacheForTesting()
         BrowserCookieKeychainAccessGate.isDisabled = false
@@ -260,7 +302,10 @@ struct ChromeCookieImporterTests {
     }
 
     private static func encryptAES128CBCPKCS7(plaintext: Data, key: Data) -> Data {
-        let iv = Data(repeating: 0x20, count: kCCBlockSizeAES128)
+        Self.encryptAES128CBCPKCS7(plaintext: plaintext, key: key, iv: Data(repeating: 0x20, count: kCCBlockSizeAES128))
+    }
+
+    private static func encryptAES128CBCPKCS7(plaintext: Data, key: Data, iv: Data) -> Data {
         var out = Data(count: plaintext.count + kCCBlockSizeAES128)
         let outCapacity = out.count
         var outLength: size_t = 0
