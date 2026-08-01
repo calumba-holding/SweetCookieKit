@@ -84,6 +84,20 @@ struct ChromeCookieImporterTests {
     }
 
     @Test
+    func `legacy v10 metadata prefix is stripped without truncating the value`() {
+        let key = Data(repeating: 0x55, count: kCCKeySizeAES128)
+        let metadata = Data((0..<32).map { UInt8($0) })
+        let value = Data("session-token-abcdefghijklmnopqrstuvwxyz-0123456789".utf8)
+        let plaintext = metadata + value
+
+        let encrypted = Self.encryptAES128CBCPKCS7(plaintext: plaintext, key: key)
+        let encoded = Data("v10".utf8) + encrypted
+
+        let decrypted = ChromeCookieImporter.decryptChromiumValue(encoded, key: key)
+        #expect(decrypted == String(data: value, encoding: .utf8))
+    }
+
+    @Test
     func `chrome safe storage key caches noninteractive reads per browser`() throws {
         ChromeCookieImporter.resetSafeStorageKeyCacheForTesting()
         BrowserCookieKeychainAccessGate.isDisabled = false

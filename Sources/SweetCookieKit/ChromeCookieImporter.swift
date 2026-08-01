@@ -290,6 +290,9 @@ enum ChromeCookieImporter {
 
         // Newer Chrome builds store a 16-byte prefix and the real IV in the
         // ciphertext (payload[16..<32]) instead of using the legacy fixed IV.
+        // Older legacy blobs may also start with decrypted metadata bytes; that
+        // case is handled by the legacy path below, whose control-character
+        // stripping removes any leading metadata before the cookie value.
         if payload.count >= 32,
            let decrypted = Self.decryptCBC(Data(payload[32...]), iv: Data(payload[16..<32]), key: key),
            let candidate = Self.decodeCandidate(decrypted)
