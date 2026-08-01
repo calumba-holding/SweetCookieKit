@@ -1,4 +1,5 @@
 import CommonCrypto
+import CryptoKit
 import Foundation
 import LocalAuthentication
 import Security
@@ -28,17 +29,125 @@ struct ChromeCookieImporterTests {
     }
 
     @Test
-    func `decrypt chromium value strips mac OSV 10 prefix`() {
+    func `version 24 values validate and strip the domain hash`() {
         let key = Data(repeating: 0x11, count: kCCKeySizeAES128)
-        let prefix = Data((0..<32).map { UInt8($0) })
-        let value = Data([0x00]) + Data("hello".utf8)
-        let plaintext = prefix + value
+        let hostKey = ".example.com"
+        let domainHash = Data(SHA256.hash(data: Data(hostKey.utf8)))
+        let plaintext = domainHash + Data("hello".utf8)
 
         let encrypted = Self.encryptAES128CBCPKCS7(plaintext: plaintext, key: key)
         let encoded = Data("v10".utf8) + encrypted
 
-        let decrypted = ChromeCookieImporter.decryptChromiumValue(encoded, key: key)
+        let decrypted = ChromeCookieImporter.decryptChromiumValue(
+            encoded,
+            key: key,
+            hostKey: hostKey,
+            databaseVersion: 24)
         #expect(decrypted == "hello")
+    }
+
+    @Test
+    func `version 24 values reject a mismatched domain hash`() {
+        let key = Data(repeating: 0x22, count: kCCKeySizeAES128)
+        let storedHostKey = ".example.com"
+        let domainHash = Data(SHA256.hash(data: Data(storedHostKey.utf8)))
+        let plaintext = domainHash + Data("session-value".utf8)
+
+        let encrypted = Self.encryptAES128CBCPKCS7(plaintext: plaintext, key: key)
+        let encoded = Data("v10".utf8) + encrypted
+
+        let decrypted = ChromeCookieImporter.decryptChromiumValue(
+            encoded,
+            key: key,
+            hostKey: ".other.example",
+            databaseVersion: 24)
+        #expect(decrypted == nil)
+    }
+
+    @Test
+    func `pre version 24 values longer than 32 bytes are not truncated`() {
+        let key = Data(repeating: 0x33, count: kCCKeySizeAES128)
+        let plaintext = Data(String(repeating: "a", count: 60).utf8)
+
+        let encrypted = Self.encryptAES128CBCPKCS7(plaintext: plaintext, key: key)
+        let encoded = Data("v10".utf8) + encrypted
+
+        let decrypted = ChromeCookieImporter.decryptChromiumValue(
+            encoded,
+            key: key,
+            hostKey: ".example.com",
+            databaseVersion: 23)
+        #expect(decrypted == String(data: plaintext, encoding: .utf8))
+    }
+
+    @Test
+    func `pre version 24 short values still decrypt`() {
+        let key = Data(repeating: 0x44, count: kCCKeySizeAES128)
+        let plaintext = Data("yes".utf8)
+
+        let encrypted = Self.encryptAES128CBCPKCS7(plaintext: plaintext, key: key)
+        let encoded = Data("v10".utf8) + encrypted
+
+        let decrypted = ChromeCookieImporter.decryptChromiumValue(
+            encoded,
+            key: key,
+            hostKey: ".example.com",
+            databaseVersion: 23)
+        #expect(decrypted == "yes")
+    }
+
+    @Test
+    func `pre version 24 unicode values still decrypt`() {
+        let key = Data(repeating: 0x45, count: kCCKeySizeAES128)
+        let plaintext = Data("登录成功🍪".utf8)
+
+        let encrypted = Self.encryptAES128CBCPKCS7(plaintext: plaintext, key: key)
+        let encoded = Data("v10".utf8) + encrypted
+
+        let decrypted = ChromeCookieImporter.decryptChromiumValue(
+            encoded,
+            key: key,
+            hostKey: ".example.com",
+            databaseVersion: 23)
+        #expect(decrypted == String(data: plaintext, encoding: .utf8))
+    }
+
+    @Test
+    func `version 24 unicode values still decrypt`() {
+        let key = Data(repeating: 0x46, count: kCCKeySizeAES128)
+        let hostKey = ".example.com"
+        let value = Data("登录成功🍪".utf8)
+        let domainHash = Data(SHA256.hash(data: Data(hostKey.utf8)))
+        let plaintext = domainHash + value
+
+        let encrypted = Self.encryptAES128CBCPKCS7(plaintext: plaintext, key: key)
+        let encoded = Data("v10".utf8) + encrypted
+
+        let decrypted = ChromeCookieImporter.decryptChromiumValue(
+            encoded,
+            key: key,
+            hostKey: hostKey,
+            databaseVersion: 24)
+        #expect(decrypted == String(data: value, encoding: .utf8))
+    }
+
+    @Test
+    func `version 24 domain hash is stripped without truncating a long value`() {
+        let key = Data(repeating: 0x55, count: kCCKeySizeAES128)
+        let hostKey = ".example.com"
+        let domainHash = Data(SHA256.hash(data: Data(hostKey.utf8)))
+        let value = Data("session-token-abcdefghijklmnopqrstuvwxyz-0123456789".utf8)
+        let plaintext = domainHash + value
+
+        let encrypted = Self.encryptAES128CBCPKCS7(plaintext: plaintext, key: key)
+        let encoded = Data("v10".utf8) + encrypted
+
+        let decrypted = ChromeCookieImporter.decryptChromiumValue(
+            encoded,
+            key: key,
+            hostKey: hostKey,
+            databaseVersion: 24)
+        #expect(decrypted == String(data: value, encoding: .utf8))
     }
 
     @Test
@@ -260,7 +369,10 @@ struct ChromeCookieImporterTests {
     }
 
     private static func encryptAES128CBCPKCS7(plaintext: Data, key: Data) -> Data {
-        let iv = Data(repeating: 0x20, count: kCCBlockSizeAES128)
+        self.encryptAES128CBCPKCS7(plaintext: plaintext, key: key, iv: Data(repeating: 0x20, count: kCCBlockSizeAES128))
+    }
+
+    private static func encryptAES128CBCPKCS7(plaintext: Data, key: Data, iv: Data) -> Data {
         var out = Data(count: plaintext.count + kCCBlockSizeAES128)
         let outCapacity = out.count
         var outLength: size_t = 0

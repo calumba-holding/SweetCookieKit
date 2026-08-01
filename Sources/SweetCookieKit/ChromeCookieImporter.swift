@@ -1,5 +1,6 @@
 #if os(macOS)
 import CommonCrypto
+import CryptoKit
 import Darwin
 import Foundation
 import LocalAuthentication
@@ -128,6 +129,8 @@ enum ChromeCookieImporter {
         }
         defer { sqlite3_close(db) }
 
+        let databaseVersion = try Self.cookieDatabaseVersion(db)
+
         let conditions = BrowserCookieDomainMatcher.sqlCondition(
             column: "host_key",
             patterns: matchingDomains,
@@ -159,7 +162,14 @@ enum ChromeCookieImporter {
             let value: String
             if let plain, !plain.isEmpty {
                 value = plain
-            } else if let enc, !enc.isEmpty, let decrypted = Self.decryptChromiumValue(enc, key: key) {
+            } else if let enc,
+                      !enc.isEmpty,
+                      let decrypted = Self.decryptChromiumValue(
+                          enc,
+                          key: key,
+                          hostKey: hostKey,
+                          databaseVersion: databaseVersion)
+            {
                 value = decrypted
             } else {
                 continue
@@ -175,6 +185,20 @@ enum ChromeCookieImporter {
                 value: value))
         }
         return out
+    }
+
+    private static func cookieDatabaseVersion(_ db: OpaquePointer?) throws -> Int {
+        let sql = "SELECT value FROM meta WHERE key = 'version'"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw ImportError.sqliteFailed(message: String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+
+        guard sqlite3_step(stmt) == SQLITE_ROW else {
+            throw ImportError.sqliteFailed(message: "Chromium cookie database version is missing.")
+        }
+        return Int(sqlite3_column_int(stmt, 0))
     }
 
     private static func readTextColumn(_ stmt: OpaquePointer?, index: Int32) -> String? {
@@ -279,23 +303,43 @@ enum ChromeCookieImporter {
     }
 
     /// Exposed for tests.
-    static func decryptChromiumValue(_ encryptedValue: Data, key: Data) -> String? {
+    static func decryptChromiumValue(
+        _ encryptedValue: Data,
+        key: Data,
+        hostKey: String,
+        databaseVersion: Int) -> String?
+    {
         guard encryptedValue.count > 3 else { return nil }
         let prefix = encryptedValue.prefix(3)
-        let prefixString = String(data: prefix, encoding: .utf8)
-        let payload = encryptedValue.dropFirst(3)
+        guard String(data: prefix, encoding: .utf8) == "v10" else { return nil }
+        let payload = Data(encryptedValue.dropFirst(3))
 
-        if prefixString != "v10" {
+        let legacyIV = Data(repeating: 0x20, count: kCCBlockSizeAES128)
+        guard let decrypted = Self.decryptCBC(payload, iv: legacyIV, key: key) else {
             return nil
         }
 
-        let iv = Data(repeating: 0x20, count: kCCBlockSizeAES128)
-        var out = Data(count: payload.count + kCCBlockSizeAES128)
+        let value: Data
+        if databaseVersion >= 24 {
+            let expectedDomainHash = Data(SHA256.hash(data: Data(hostKey.utf8)))
+            guard decrypted.starts(with: expectedDomainHash) else { return nil }
+            value = Data(decrypted.dropFirst(expectedDomainHash.count))
+        } else {
+            value = decrypted
+        }
+
+        return String(data: value, encoding: .utf8)
+    }
+
+    private static func decryptCBC(_ ciphertext: Data, iv: Data, key: Data) -> Data? {
+        guard !ciphertext.isEmpty, ciphertext.count.isMultiple(of: kCCBlockSizeAES128) else {
+            return nil
+        }
+        var out = Data(count: ciphertext.count + kCCBlockSizeAES128)
         var outLength: size_t = 0
         let outCapacity = out.count
-
         let status = out.withUnsafeMutableBytes { outBytes in
-            payload.withUnsafeBytes { inBytes in
+            ciphertext.withUnsafeBytes { inBytes in
                 key.withUnsafeBytes { keyBytes in
                     iv.withUnsafeBytes { ivBytes in
                         CCCrypt(
@@ -306,7 +350,7 @@ enum ChromeCookieImporter {
                             key.count,
                             ivBytes.baseAddress,
                             inBytes.baseAddress,
-                            payload.count,
+                            ciphertext.count,
                             outBytes.baseAddress,
                             outCapacity,
                             &outLength)
@@ -316,23 +360,7 @@ enum ChromeCookieImporter {
         }
         guard status == kCCSuccess else { return nil }
         out.count = outLength
-
-        let candidate = out.count > 32 ? out.dropFirst(32) : out[...]
-        if let decoded = String(data: Data(candidate), encoding: .utf8) {
-            return Self.cleanValue(decoded)
-        }
-        if let decoded = String(data: out, encoding: .utf8) {
-            return Self.cleanValue(decoded)
-        }
-        return nil
-    }
-
-    private static func cleanValue(_ value: String) -> String {
-        var i = value.startIndex
-        while i < value.endIndex, value[i].unicodeScalars.allSatisfy({ $0.value < 0x20 }) {
-            i = value.index(after: i)
-        }
-        return String(value[i...])
+        return out
     }
 
     private struct SafeStorageSelection {
