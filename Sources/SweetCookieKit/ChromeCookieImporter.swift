@@ -1,5 +1,6 @@
 #if os(macOS)
 import CommonCrypto
+import CryptoKit
 import Darwin
 import Foundation
 import LocalAuthentication
@@ -128,6 +129,8 @@ enum ChromeCookieImporter {
         }
         defer { sqlite3_close(db) }
 
+        let databaseVersion = try Self.cookieDatabaseVersion(db)
+
         let conditions = BrowserCookieDomainMatcher.sqlCondition(
             column: "host_key",
             patterns: matchingDomains,
@@ -159,7 +162,14 @@ enum ChromeCookieImporter {
             let value: String
             if let plain, !plain.isEmpty {
                 value = plain
-            } else if let enc, !enc.isEmpty, let decrypted = Self.decryptChromiumValue(enc, key: key) {
+            } else if let enc,
+                      !enc.isEmpty,
+                      let decrypted = Self.decryptChromiumValue(
+                          enc,
+                          key: key,
+                          hostKey: hostKey,
+                          databaseVersion: databaseVersion)
+            {
                 value = decrypted
             } else {
                 continue
@@ -175,6 +185,20 @@ enum ChromeCookieImporter {
                 value: value))
         }
         return out
+    }
+
+    private static func cookieDatabaseVersion(_ db: OpaquePointer?) throws -> Int {
+        let sql = "SELECT value FROM meta WHERE key = 'version'"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw ImportError.sqliteFailed(message: String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+
+        guard sqlite3_step(stmt) == SQLITE_ROW else {
+            throw ImportError.sqliteFailed(message: "Chromium cookie database version is missing.")
+        }
+        return Int(sqlite3_column_int(stmt, 0))
     }
 
     private static func readTextColumn(_ stmt: OpaquePointer?, index: Int32) -> String? {
@@ -279,35 +303,32 @@ enum ChromeCookieImporter {
     }
 
     /// Exposed for tests.
-    static func decryptChromiumValue(_ encryptedValue: Data, key: Data) -> String? {
+    static func decryptChromiumValue(
+        _ encryptedValue: Data,
+        key: Data,
+        hostKey: String,
+        databaseVersion: Int) -> String?
+    {
         guard encryptedValue.count > 3 else { return nil }
         let prefix = encryptedValue.prefix(3)
         guard String(data: prefix, encoding: .utf8) == "v10" else { return nil }
         let payload = Data(encryptedValue.dropFirst(3))
 
         let legacyIV = Data(repeating: 0x20, count: kCCBlockSizeAES128)
-        var candidates: [(value: String, score: Int)] = []
-
-        // Newer Chrome builds store a 16-byte prefix and the real IV in the
-        // ciphertext (payload[16..<32]) instead of using the legacy fixed IV.
-        // Older legacy blobs may also start with decrypted metadata bytes; that
-        // case is handled by the legacy path below, whose control-character
-        // stripping removes any leading metadata before the cookie value.
-        if payload.count >= 32,
-           let decrypted = Self.decryptCBC(Data(payload[32...]), iv: Data(payload[16..<32]), key: key),
-           let candidate = Self.decodeCandidate(decrypted)
-        {
-            candidates.append(candidate)
+        guard let decrypted = Self.decryptCBC(payload, iv: legacyIV, key: key) else {
+            return nil
         }
 
-        // Legacy layout: "v10" + AES-128-CBC ciphertext with the fixed 16-space IV.
-        if let decrypted = Self.decryptCBC(Data(payload), iv: legacyIV, key: key),
-           let candidate = Self.decodeCandidate(decrypted)
-        {
-            candidates.append(candidate)
+        let value: Data
+        if databaseVersion >= 24 {
+            let expectedDomainHash = Data(SHA256.hash(data: Data(hostKey.utf8)))
+            guard decrypted.starts(with: expectedDomainHash) else { return nil }
+            value = Data(decrypted.dropFirst(expectedDomainHash.count))
+        } else {
+            value = decrypted
         }
 
-        return candidates.max { $0.score < $1.score }?.value
+        return String(data: value, encoding: .utf8)
     }
 
     private static func decryptCBC(_ ciphertext: Data, iv: Data, key: Data) -> Data? {
@@ -340,28 +361,6 @@ enum ChromeCookieImporter {
         guard status == kCCSuccess else { return nil }
         out.count = outLength
         return out
-    }
-
-    /// Decodes a decrypted payload and rejects results that are not mostly
-    /// printable ASCII. Decrypting with the wrong layout yields random bytes
-    /// that usually fail UTF-8 decoding or contain many control characters.
-    private static func decodeCandidate(_ data: Data) -> (value: String, score: Int)? {
-        guard let decoded = String(data: data, encoding: .utf8) else { return nil }
-        let cleaned = Self.cleanValue(decoded)
-        guard !cleaned.isEmpty else { return nil }
-        let scalars = Array(cleaned.unicodeScalars)
-        let printable = scalars.filter { $0.value >= 0x20 && $0.value <= 0x7E }
-            .count
-        guard printable * 10 >= scalars.count * 8 else { return nil }
-        return (cleaned, printable)
-    }
-
-    private static func cleanValue(_ value: String) -> String {
-        var i = value.startIndex
-        while i < value.endIndex, value[i].unicodeScalars.allSatisfy({ $0.value < 0x20 }) {
-            i = value.index(after: i)
-        }
-        return String(value[i...])
     }
 
     private struct SafeStorageSelection {

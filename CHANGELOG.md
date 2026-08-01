@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Chromium: validate and strip schema-v24 domain hashes while preserving long and Unicode legacy cookie values. (#17, thanks @Yuxin-Qiao)
 - Chromium: prevent duplicate legacy Keychain prompts while preserving no-UI Safe Storage fallback. (#16, thanks @lgrygo-codi)
 
 ## 0.5.0 — 2026-07-18
