@@ -1,5 +1,7 @@
 # Changelog
 
+## 0.5.2 - Unreleased
+
 ## 0.5.1 — 2026-08-01
 
 - Chromium: validate and strip schema-v24 domain hashes while preserving long and Unicode legacy cookie values. (#17, thanks @Yuxin-Qiao)
