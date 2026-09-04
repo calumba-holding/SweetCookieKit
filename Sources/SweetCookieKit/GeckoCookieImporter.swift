@@ -165,7 +165,7 @@ enum GeckoCookieImporter {
             let expiresDate = expiry > 0 ? Date(timeIntervalSince1970: TimeInterval(expiry)) : nil
 
             out.append(CookieRecord(
-                host: BrowserCookieDomainMatcher.normalizeDomain(host),
+                host: host,
                 name: name,
                 path: path,
                 value: value,

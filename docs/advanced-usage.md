@@ -32,6 +32,8 @@ let cookies = try client.cookies(matching: query, in: store)
 
 `records(matching:in:)` returns normalized `BrowserCookieRecord` values. `cookies(matching:in:)` converts matching records to `HTTPCookie` values using the query's origin strategy.
 
+For Safari, Chromium, and Gecko stores, each record's `scope` retains whether the stored cookie was host-only or a domain cookie. For example, stored `.example.com` and `example.com` cookies both have the normalized `domain` value `example.com`, with `.domain` and `.hostOnly` scope respectively.
+
 ## Search multiple browsers
 
 `Browser.defaultImportOrder` contains every supported browser in the package's preferred search order. Callers can loop over that list or provide a smaller selection:

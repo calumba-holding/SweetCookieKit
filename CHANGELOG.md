@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Preserve domain-cookie scope when importing Safari, Firefox, and Zen cookies instead of reporting every cookie as host-only.
+
 ## 0.5.2 — 2026-08-03
 
 - Preserve host-only versus domain scope on normalized browser cookie records.

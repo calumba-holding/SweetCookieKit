@@ -1,4 +1,5 @@
 import Foundation
+import SQLite3
 import Testing
 @testable import SweetCookieKit
 
@@ -51,6 +52,49 @@ struct BrowserCookieClientTests {
             #expect(record.scope == fixture.scope)
             #expect(record.name == "synthetic")
         }
+    }
+
+    @Test(arguments: [Browser.firefox, .firefoxBeta, .firefoxDeveloperEdition, .firefoxNightly, .zen])
+    func `gecko records preserve stored cookie scope`(browser: Browser) throws {
+        let home = try Self.makeTemporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let databaseURL = home.appendingPathComponent("cookies.sqlite")
+        try Self.writeGeckoCookies(databaseURL)
+        let store = BrowserCookieStore(
+            browser: browser,
+            profile: BrowserProfile(id: "synthetic", name: "Synthetic"),
+            kind: .primary,
+            label: "Synthetic",
+            databaseURL: databaseURL)
+        let client = BrowserCookieClient(configuration: .init(homeDirectories: [home]))
+        let records = try client.records(matching: .init(domains: ["example.com"], domainMatch: .suffix), in: store)
+
+        #expect(records.count == 4)
+        for record in records {
+            #expect(record.domain == (record.name.hasPrefix("sub-") ? "sub.example.com" : "example.com"))
+            #expect(record.scope == (record.name.hasSuffix("domain") ? .domain : .hostOnly))
+            #expect(record.value == "synthetic")
+        }
+    }
+
+    @Test(arguments: [".example.com", "example.com", ".sub.example.com", "sub.example.com"])
+    func `safari records preserve stored cookie scope`(storedDomain: String) throws {
+        let home = try Self.makeTemporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        try Self.writeCookieFile(
+            home.appendingPathComponent("Library/Cookies/Cookies.binarycookies"),
+            domain: storedDomain,
+            name: "session",
+            value: "synthetic")
+        let client = BrowserCookieClient(configuration: .init(homeDirectories: [home]))
+        let store = try #require(client.stores(for: .safari).first)
+        let records = try client.records(matching: .init(domains: ["example.com"], domainMatch: .suffix), in: store)
+        let record = try #require(records.first)
+
+        #expect(records.count == 1)
+        #expect(record.domain == storedDomain.trimmingPrefix("."))
+        #expect(record.scope == (storedDomain.hasPrefix(".") ? .domain : .hostOnly))
+        #expect(record.value == "synthetic")
     }
 
     @Test
@@ -286,6 +330,22 @@ struct BrowserCookieClientTests {
             to: profile.appendingPathComponent("compatibility.ini"),
             atomically: true,
             encoding: .utf8)
+    }
+
+    private static func writeGeckoCookies(_ url: URL) throws {
+        var database: OpaquePointer?
+        let result = sqlite3_open(url.path, &database)
+        defer { sqlite3_close(database) }
+        try #require(result == SQLITE_OK)
+        let sql = """
+        CREATE TABLE moz_cookies (host TEXT, name TEXT, path TEXT, value TEXT, expiry INTEGER,
+                                 isSecure INTEGER, isHttpOnly INTEGER);
+        INSERT INTO moz_cookies VALUES ('.example.com', 'domain', '/', 'synthetic', 0, 1, 1);
+        INSERT INTO moz_cookies VALUES ('example.com', 'host', '/', 'synthetic', 0, 1, 1);
+        INSERT INTO moz_cookies VALUES ('.sub.example.com', 'sub-domain', '/', 'synthetic', 0, 1, 1);
+        INSERT INTO moz_cookies VALUES ('sub.example.com', 'sub-host', '/', 'synthetic', 0, 1, 1);
+        """
+        try #require(sqlite3_exec(database, sql, nil, nil, nil) == SQLITE_OK)
     }
 
     private static func writeCookieFile(_ url: URL, domain: String, name: String, value: String) throws {

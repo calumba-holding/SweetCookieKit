@@ -256,7 +256,7 @@ enum SafariCookieImporter {
         let expires = expiresRef > 0 ? Date(timeIntervalSinceReferenceDate: expiresRef) : nil
 
         return CookieRecord(
-            domain: Self.normalizeDomain(domain),
+            domain: domain,
             name: name,
             path: path,
             value: value,
@@ -271,12 +271,6 @@ enum SafariCookieImporter {
         let end = data[start..<limit].firstIndex(of: 0) ?? limit
         guard end > start else { return nil }
         return String(data: data.subdata(in: start..<end), encoding: .utf8)
-    }
-
-    private static func normalizeDomain(_ raw: String) -> String {
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.hasPrefix(".") { return String(trimmed.dropFirst()) }
-        return trimmed
     }
 
     private static func candidateCookieFiles(homeDirectories: [URL]) -> [URL] {
